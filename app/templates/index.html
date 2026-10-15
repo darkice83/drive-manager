@@ -1,0 +1,273 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>SAS Drive Rig Manager</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+</head>
+<body class="bg-slate-900 text-slate-100 min-h-screen font-sans">
+    <header class="bg-slate-800 border-b border-slate-700 py-4 px-6 shadow-md flex justify-between items-center">
+        <div class="flex items-center gap-4">
+            <h1 class="text-xl font-bold tracking-wide text-cyan-400">🔌 SAS Drive Rig Manager</h1>
+            <span class="text-xs bg-slate-700 text-slate-300 py-1 px-3 rounded-full uppercase font-mono">Role: {{ user.role }}</span>
+        </div>
+        <div class="flex items-center gap-4">
+            <span class="text-xs text-slate-300">Logged in as <strong class="text-white">{{ user.username }}</strong></span>
+            <a href="/logout" class="bg-rose-900/60 hover:bg-rose-800 text-rose-200 text-xs py-1.5 px-3 rounded font-semibold">Logout</a>
+        </div>
+    </header>
+
+    <main class="max-w-7xl mx-auto p-6">
+        {% if user.role == 'admin' %}
+        <div class="bg-slate-800 border border-slate-700 rounded-xl p-6 shadow-lg mb-8">
+            <h2 class="text-lg font-bold text-cyan-400 mb-4">🛠️ User Management Panel</h2>
+            <div class="grid grid-cols-1 md:grid-cols-4 gap-4 mb-6">
+                <input type="text" id="new-username" placeholder="Username" class="bg-slate-900 border border-slate-700 rounded p-2 text-sm text-white">
+                <input type="text" id="new-password" placeholder="Temp Password" class="bg-slate-900 border border-slate-700 rounded p-2 text-sm text-white">
+                <select id="new-role" class="bg-slate-900 border border-slate-700 rounded p-2 text-sm text-white">
+                    <option value="user">User (View)</option>
+                    <option value="wiper">Wiper (Wipe + View)</option>
+                    <option value="admin">Admin (Full)</option>
+                </select>
+                <button onclick="createUser()" class="bg-cyan-600 hover:bg-cyan-500 text-white text-xs font-semibold rounded py-2">Add User</button>
+            </div>
+            <div id="user-list" class="space-y-2">Loading users...</div>
+        </div>
+        {% endif %}
+
+        <div class="mb-6 flex justify-between items-center">
+            <div>
+                <h2 class="text-2xl font-semibold mb-1">Connected Hardware Drives</h2>
+                <p class="text-sm text-slate-400">Mounted and OS drives are minimized by default.</p>
+            </div>
+            <button onclick="fetchDrives()" class="bg-slate-700 hover:bg-slate-600 text-xs font-semibold py-2 px-4 rounded transition text-cyan-300">🔄 Refresh Dashboard</button>
+        </div>
+
+        <div id="drive-container" class="grid grid-cols-1 gap-6">
+            <div class="text-slate-500 text-center py-12">Loading drives...</div>
+        </div>
+    </main>
+
+    <script>
+        const currentUserRole = "{{ user.role }}";
+        const smartCache = {};
+        const collapseState = {}; // Track expanded/collapsed state per drive serial
+        if (currentUserRole === 'admin') loadUsers();
+
+        function formatLocalDateTime(utcString) {
+            if (!utcString) return '';
+            const iso = utcString.endsWith('Z') || utcString.includes('+') ? utcString : utcString.replace(' ', 'T') + 'Z';
+            const date = new Date(iso);
+            if (isNaN(date.getTime())) return utcString;
+            return date.toLocaleString(undefined, {
+                year: 'numeric', month: '2-digit', day: '2-digit',
+                hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false
+            });
+        }
+
+        function loadUsers() {
+            fetch('/api/users').then(res => res.json()).then(users => {
+                let html = '';
+                users.forEach(u => {
+                    html += `<div class="flex justify-between items-center bg-slate-900/60 p-3 rounded border border-slate-800 text-xs">
+                        <div><strong class="text-white">${u.username}</strong> <span class="bg-slate-800 text-cyan-300 px-2 py-0.5 rounded ml-2 uppercase">${u.role}</span></div>
+                        ${u.id !== {{ user.id }} ? `<button onclick="deleteUser(${u.id})" class="text-rose-400 hover:text-rose-300 font-semibold">Delete</button>` : '<span class="text-slate-500 italic">Current User</span>'}
+                    </div>`;
+                });
+                document.getElementById('user-list').innerHTML = html;
+            });
+        }
+
+        function createUser() {
+            const username = document.getElementById('new-username').value;
+            const password = document.getElementById('new-password').value;
+            const role = document.getElementById('new-role').value;
+            if(!username || !password) return alert('Fill out username and password.');
+            fetch('/api/users', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({username, password, role})
+            }).then(res => {
+                if(res.ok) { document.getElementById('new-username').value=''; document.getElementById('new-password').value=''; loadUsers(); }
+                else alert('Failed to create user.');
+            });
+        }
+
+        function deleteUser(id) {
+            if(!confirm('Delete this user?')) return;
+            fetch(`/api/users/${id}`, {method: 'DELETE'}).then(res => { if(res.ok) loadUsers(); else alert('Failed.'); });
+        }
+
+        function toggleCollapse(serial) {
+            collapseState[serial] = !collapseState[serial];
+            fetchDrives();
+        }
+
+        function fetchDrives() {
+            fetch('/api/drives')
+                .then(res => res.json())
+                .then(drives => {
+                    const container = document.getElementById('drive-container');
+                    if (drives.length === 0) {
+                        container.innerHTML = `<div class="bg-slate-800 p-8 rounded-xl border border-slate-700 text-center text-slate-400">No drives detected.</div>`;
+                        return;
+                    }
+
+                    let html = '';
+                    drives.forEach(d => {
+                        // Initialize collapse state: default minimized if mounted (OS drive)
+                        if (collapseState[d.serial] === undefined) {
+                            collapseState[d.serial] = d.is_mounted;
+                        }
+                        const isCollapsed = collapseState[d.serial];
+
+                        let historyHtml = '';
+                        let hasActiveTask = false;
+                        d.history.forEach(h => {
+                            if (h.status === 'running') hasActiveTask = true;
+                            let statusColor = h.status === 'completed' ? 'bg-emerald-900 text-emerald-300' : h.status === 'failed' ? 'bg-rose-900 text-rose-300' : h.status === 'running' ? 'bg-amber-900 text-amber-300 animate-pulse' : 'bg-purple-900 text-purple-300';
+                            let localStart = formatLocalDateTime(h.start_time);
+                            let localEnd = formatLocalDateTime(h.end_time);
+
+                            let metricsHtml = '';
+                            if (h.status === 'completed' || h.status === 'failed') {
+                                metricsHtml = `<div class="mt-2 pt-2 border-t border-slate-800 grid grid-cols-2 gap-2 font-mono text-[10px] text-slate-300">
+                                    <div>Before: <strong class="text-white">${h.partition_table_before || 'N/A'}</strong> (${h.filesystem_before || 'None'})</div>
+                                    <div>After: <strong class="text-white">${h.partition_table_after || 'N/A'}</strong> (${h.filesystem_after || 'None'})</div>
+                                    <div>Duration: <strong class="text-cyan-300">${h.duration_seconds !== null ? h.duration_seconds + 's' : 'N/A'}</strong></div>
+                                    ${h.speed_mb_s !== null ? `<div>Speed: <strong class="text-emerald-300">${h.speed_mb_s} MB/s</strong></div>` : ''}
+                                </div>`;
+                            }
+
+                            historyHtml += `<div class="p-2.5 bg-slate-900/60 rounded border border-slate-800 text-[11px] mb-2">
+                                <div class="flex justify-between items-center mb-1"><span class="font-semibold uppercase text-cyan-300">${h.action}</span><span class="px-1.5 py-0.2 rounded font-bold ${statusColor}">${h.status} (${h.progress}%)</span></div>
+                                ${h.status === 'running' ? `<div class="w-full bg-slate-700 rounded-full h-1.5 my-1.5"><div class="bg-cyan-500 h-1.5 rounded-full transition-all" style="width: ${h.progress}%"></div></div>` : ''}
+                                <div class="text-slate-400 flex justify-between text-[10px]"><span>Started: ${localStart}</span><span>${localEnd ? 'Ended: ' + localEnd : ''}</span></div>
+                                ${h.details ? `<div class="text-rose-400 text-[10px] mt-1">Note: ${h.details}</div>` : ''}
+                                ${metricsHtml}
+                            </div>`;
+                        });
+
+                        let healthLogsHtml = '';
+                        d.health_logs.forEach(l => {
+                            let localTime = formatLocalDateTime(l.logged_at);
+                            healthLogsHtml += `<div class="p-2 bg-slate-900/60 rounded border border-slate-800 text-[11px] mb-1 flex justify-between items-center">
+                                <div><span class="text-cyan-400 font-mono">${localTime}</span> <span class="bg-emerald-900 text-emerald-300 px-1.5 py-0.2 rounded text-[10px] ml-1">${l.health_status}</span></div>
+                                <div class="text-slate-300 font-mono text-[10px]">Temp: <strong class="text-white">${l.temperature !== null ? l.temperature + '°C' : 'N/A'}</strong> | POH: <strong class="text-white">${l.power_on_hours !== null ? l.power_on_hours + 'h' : 'N/A'}</strong> | Realloc: <strong class="text-white">${l.reallocated_sectors !== null ? l.reallocated_sectors : '0'}</strong></div>
+                            </div>`;
+                        });
+
+                        let actionBtns = '';
+                        if (currentUserRole === 'user') {
+                            actionBtns = `<span class="text-xs text-slate-500 italic">Actions restricted</span>`;
+                        } else if (d.is_mounted) {
+                            actionBtns = `<button disabled class="bg-slate-700 text-slate-400 cursor-not-allowed text-xs font-semibold py-1.5 px-3 rounded">🔒 OS / Mounted Drive</button>`;
+                        } else if (hasActiveTask) {
+                            actionBtns = `<button disabled class="bg-amber-700 opacity-50 cursor-not-allowed text-xs font-semibold py-1.5 px-3 rounded text-white">Task in Progress...</button>`;
+                        } else {
+                            let formatBtn = '';
+                            if (d.needs_formatting) {
+                                formatBtn = `<button onclick="startFormat('${d.serial}', '${d.path}')" class="bg-indigo-600 hover:bg-indigo-500 text-xs font-semibold py-1.5 px-3 rounded transition text-white" title="Reason: ${d.format_reason}">Format to 512B & Strip DIP</button>`;
+                            }
+                            actionBtns = `<div class="flex gap-2 items-center">
+                                ${formatBtn}
+                                <button onclick="startWipe('${d.serial}', '${d.path}')" class="bg-rose-600 hover:bg-rose-500 text-xs font-semibold py-1.5 px-3 rounded transition text-white">Secure Wipe Drive</button>
+                            </div>`;
+                        }
+
+                        const smartContent = smartCache[d.serial] || 'Loading SMART data...';
+
+                        html += `<div class="bg-slate-800 border border-slate-700 rounded-xl p-4 shadow-lg mb-4">
+                            <div class="flex flex-col md:flex-row justify-between items-start md:items-center gap-4 ${isCollapsed ? '' : 'border-b border-slate-700 pb-4 mb-4'}">
+                                <div class="flex items-center gap-3">
+                                    <button onclick="toggleCollapse('${d.serial}')" class="bg-slate-700 hover:bg-slate-600 text-cyan-300 font-mono text-xs px-2.5 py-1 rounded transition">
+                                        ${isCollapsed ? '▶ Expand' : '▼ Minimize'}
+                                    </button>
+                                    <div>
+                                        <div class="flex items-center gap-3"><h3 class="text-base font-bold text-white">${d.model}</h3><span class="bg-slate-700 text-slate-300 text-xs px-2 py-0.5 rounded font-mono">${d.name} (${d.path})</span></div>
+                                        <p class="text-xs text-slate-400 mt-0.5">Serial: <span class="font-mono text-cyan-300">${d.serial}</span> | Size: <span class="text-slate-200">${d.size}</span> | Transport: <span class="uppercase">${d.transport}</span> ${d.needs_formatting ? `<span class="ml-2 bg-amber-900/80 text-amber-200 px-2 py-0.5 rounded text-[10px]">⚠️ ${d.format_reason}</span>` : ''} ${d.is_mounted ? `<span class="ml-2 bg-slate-700 text-slate-300 px-2 py-0.5 rounded text-[10px]">🔒 OS / Mounted</span>` : ''}</p>
+                                    </div>
+                                </div>
+                                <div class="flex gap-2 items-center">
+                                    ${actionBtns}
+                                </div>
+                            </div>
+
+                            ${isCollapsed ? '' : `
+                            <div class="grid grid-cols-1 lg:grid-cols-2 gap-4">
+                                <div class="space-y-4">
+                                    <div>
+                                        <h4 class="text-xs font-bold uppercase tracking-wider text-slate-400 mb-2">Drive Action History & Metrics</h4>
+                                        <div class="max-h-48 overflow-y-auto pr-2 bg-slate-900/40 p-2 rounded border border-slate-800">${historyHtml || '<p class="text-[11px] text-slate-500 italic">No wipe or task history.</p>'}</div>
+                                    </div>
+                                    <div>
+                                        <h4 class="text-xs font-bold uppercase tracking-wider text-slate-400 mb-2">Health Trend Log (SMART Snapshots)</h4>
+                                        <div class="max-h-36 overflow-y-auto pr-2 bg-slate-900/40 p-2 rounded border border-slate-800">${healthLogsHtml || '<p class="text-[11px] text-slate-500 italic">Refreshing SMART will record health snapshots here.</p>'}</div>
+                                    </div>
+                                </div>
+                                <div>
+                                    <div class="flex justify-between items-center mb-2">
+                                        <h4 class="text-xs font-bold uppercase tracking-wider text-slate-400">SMART Diagnostics</h4>
+                                        <button onclick="refreshSmart('${d.serial}')" class="bg-slate-700 hover:bg-slate-600 text-[10px] text-cyan-300 px-2 py-1 rounded transition font-semibold">🔄 Refresh SMART</button>
+                                    </div>
+                                    <pre id="smart-${d.serial}" class="max-h-64 overflow-y-auto bg-slate-900 p-3 rounded border border-slate-800 font-mono text-[11px] text-slate-300 whitespace-pre-wrap">${smartContent}</pre>
+                                </div>
+                            </div>
+                            `}
+                        </div>`;
+                    });
+                    container.innerHTML = html;
+
+                    drives.forEach(d => {
+                        if (!collapseState[d.serial] && !smartCache[d.serial]) {
+                            refreshSmart(d.serial);
+                        }
+                    });
+                })
+                .catch(err => console.error("Error fetching drives:", err));
+        }
+
+        fetchDrives();
+
+        function refreshSmart(serial) {
+            const el = document.getElementById(`smart-${serial}`);
+            if (el) el.innerText = 'Fetching SMART diagnostics...';
+
+            fetch(`/api/drives/${serial}/smart`)
+                .then(res => res.json())
+                .then(data => {
+                    smartCache[serial] = data.smart;
+                    if (el) el.innerText = data.smart;
+                    fetchDrives();
+                })
+                .catch(() => {
+                    if (el) el.innerText = 'Failed to load SMART diagnostics.';
+                });
+        }
+
+        function startWipe(serial, path) {
+            if (!confirm(`Are you sure you want to securely wipe ${path} (${serial})?`)) return;
+            fetch('/api/drives/wipe', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ serial: serial, path: path })
+            }).then(res => res.json()).then(data => {
+                if (data.success) fetchDrives();
+                else alert('Failed to start wipe.');
+            });
+        }
+
+        function startFormat(serial, path) {
+            if (!confirm(`Reformat ${path} (${serial}) to 512 bytes and strip DIP/PI protection?`)) return;
+            fetch('/api/drives/format', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ serial: serial, path: path })
+            }).then(res => res.json()).then(data => {
+                if (data.success) fetchDrives();
+                else alert('Failed to start format task.');
+            });
+        }
+    </script>
+</body>
+</html>
